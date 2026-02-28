@@ -12,9 +12,9 @@ import pandas as pd
 import io
 
 # ─── CONFIGURATION ───────────────────────────────────────────────────────────
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "YOUR_GEMINI_API_KEY")
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))  # Your Telegram user ID
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
+ADMIN_ID = int(os.environ["ADMIN_ID"])
 
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel("gemini-1.5-flash")
