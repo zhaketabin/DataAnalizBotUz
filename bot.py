@@ -16,7 +16,7 @@ GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 ADMIN_ID = int(os.environ["ADMIN_ID"])
 
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("gemini-1.5-pro")
+model = genai.GenerativeModel("gemini-2.0-flash-exp")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
