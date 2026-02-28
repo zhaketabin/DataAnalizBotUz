@@ -12,9 +12,9 @@ import pandas as pd
 import io
 
 # ─── CONFIGURATION ───────────────────────────────────────────────────────────
-BOT_TOKEN = os.environ.get("BOT_TOKEN") or "ТОКЕНДІ_ОСЫ_ЖЕРГЕ_ЖАЗ"
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") or "GEMINI_КІЛТІН_ОСЫ_ЖЕРГЕ_ЖАЗ"
-ADMIN_ID = int(os.environ.get("ADMIN_ID") or "ADMIN_ID_ОСЫ_ЖЕРГЕ_ЖАЗ")
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
+ADMIN_ID = int(os.environ["ADMIN_ID"])
 
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel("gemini-1.5-flash")
@@ -27,7 +27,7 @@ LANGUAGE, WAITING_FILE = range(2)
 
 # ─── DATABASE ────────────────────────────────────────────────────────────────
 def init_db():
-    conn = sqlite3.connect("clients.db")
+    conn = sqlite3.connect("/data/clients.db")
     c = conn.cursor()
     c.execute("""
         CREATE TABLE IF NOT EXISTS clients (
@@ -43,7 +43,7 @@ def init_db():
     conn.close()
 
 def get_client(telegram_id):
-    conn = sqlite3.connect("clients.db")
+    conn = sqlite3.connect("/data/clients.db")
     c = conn.cursor()
     c.execute("SELECT * FROM clients WHERE telegram_id=?", (telegram_id,))
     row = c.fetchone()
@@ -51,7 +51,7 @@ def get_client(telegram_id):
     return row
 
 def create_client(telegram_id, language):
-    conn = sqlite3.connect("clients.db")
+    conn = sqlite3.connect("/data/clients.db")
     c = conn.cursor()
     # Generate unique code ZH-705XXXXXXX
     c.execute("SELECT COUNT(*) FROM clients")
@@ -67,14 +67,14 @@ def create_client(telegram_id, language):
     return unique_code
 
 def update_language(telegram_id, lang):
-    conn = sqlite3.connect("clients.db")
+    conn = sqlite3.connect("/data/clients.db")
     c = conn.cursor()
     c.execute("UPDATE clients SET language=? WHERE telegram_id=?", (lang, telegram_id))
     conn.commit()
     conn.close()
 
 def set_active(unique_code, active: bool, months=1):
-    conn = sqlite3.connect("clients.db")
+    conn = sqlite3.connect("/data/clients.db")
     c = conn.cursor()
     from datetime import timedelta
     end_date = (datetime.now() + timedelta(days=30 * months)).strftime("%Y-%m-%d")
@@ -85,7 +85,7 @@ def set_active(unique_code, active: bool, months=1):
     conn.close()
 
 def is_active(telegram_id):
-    conn = sqlite3.connect("clients.db")
+    conn = sqlite3.connect("/data/clients.db")
     c = conn.cursor()
     c.execute("SELECT is_active, subscription_end FROM clients WHERE telegram_id=?", (telegram_id,))
     row = c.fetchone()
@@ -101,7 +101,7 @@ def is_active(telegram_id):
     return True
 
 def get_all_clients():
-    conn = sqlite3.connect("clients.db")
+    conn = sqlite3.connect("/data/clients.db")
     c = conn.cursor()
     c.execute("SELECT telegram_id, unique_code, language, is_active, subscription_end, created_at FROM clients")
     rows = c.fetchall()
@@ -477,7 +477,7 @@ async def admin_activate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     set_active(code, True, months)
     await update.message.reply_text(f"✅ {code} — {months} oyga faollashtirildi!")
     # Клиентке оның тілінде хабарлама жібер
-    conn = sqlite3.connect("clients.db")
+    conn = sqlite3.connect("/data/clients.db")
     c = conn.cursor()
     c.execute("SELECT telegram_id, language FROM clients WHERE unique_code=?", (code,))
     row = c.fetchone()
