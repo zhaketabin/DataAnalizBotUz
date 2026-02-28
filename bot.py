@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 import google.generativeai as genai
 import pandas as pd
 import io
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, filters, ContextTypes
@@ -175,6 +175,15 @@ def questions_kb(lang, section):
     btns.append([InlineKeyboardButton(t(lang, "back"), callback_data="back")])
     return InlineKeyboardMarkup(btns)
 
+async def show_menu(update_or_msg, lang, is_message=True):
+    """Send main menu — works after activation too"""
+    kb = main_kb(lang)
+    text = t(lang, "choose")
+    if is_message:
+        await update_or_msg.reply_text(text, reply_markup=kb)
+    else:
+        await update_or_msg.message.reply_text(text, reply_markup=kb)
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tid = update.effective_user.id
     client = get_client(tid)
@@ -275,6 +284,7 @@ async def on_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await wait.delete()
         await update.message.reply_text(f"📊 <b>{question}</b>\n\n{result}", parse_mode="HTML")
+        # Show menu again after analysis
         await update.message.reply_text(t(lang, "choose"), reply_markup=main_kb(lang))
         context.user_data.pop("question", None)
 
@@ -299,13 +309,15 @@ async def cmd_activate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ {code} — {months} oyga faollashtirildi!")
     lang = client[2]
     notify = {
-        "uz": f"✅ Obunangiz faollashtirildi ({months} oy)!\n\nDavom etish uchun /start yozing.",
-        "kz": f"✅ Жазылымыңыз белсендірілді ({months} ай)!\n\n/start жазыңыз.",
-        "ru": f"✅ Подписка активирована ({months} мес.)!\n\nНапишите /start.",
-        "en": f"✅ Subscription activated ({months} month(s))!\n\nWrite /start.",
+        "uz": f"✅ Obunangiz faollashtirildi ({months} oy)!",
+        "kz": f"✅ Жазылымыңыз белсендірілді ({months} ай)!",
+        "ru": f"✅ Подписка активирована ({months} мес.)!",
+        "en": f"✅ Subscription activated ({months} month(s))!",
     }
     try:
         await context.bot.send_message(chat_id=client[0], text=notify.get(lang, notify["uz"]))
+        # Send menu directly to client
+        await context.bot.send_message(chat_id=client[0], text=t(lang, "choose"), reply_markup=main_kb(lang))
     except Exception: pass
 
 async def cmd_deactivate(update: Update, context: ContextTypes.DEFAULT_TYPE):
