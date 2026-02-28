@@ -27,6 +27,7 @@ LANGUAGE, WAITING_FILE = range(2)
 
 # ─── DATABASE ────────────────────────────────────────────────────────────────
 def init_db():
+    os.makedirs("/data", exist_ok=True)
     conn = sqlite3.connect("/data/clients.db")
     c = conn.cursor()
     c.execute("""
