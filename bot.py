@@ -276,7 +276,8 @@ async def on_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         df = pd.read_csv(fio) if fname.endswith(".csv") else pd.read_excel(fio)
 
         summary = f"Ustunlar: {list(df.columns)}\nQatorlar: {len(df)}\n{df.head(20).to_string()}\n{df.describe().to_string()}"
-        prompt = f"Sen professional data analitiksan.\nSavol: {question}\nMa'lumotlar:\n{summary}\nJavobni {LANG_NAMES.get(lang,'o`zbek')} tilida yoz. Aniq raqamlar va qisqa tavsiyalar ber."
+        lang_full = {"uz": "O'zbek (lotin)", "kz": "Qazaq (kirill)", "ru": "Rus", "en": "English"}
+prompt = f"You are a professional data analyst.\nQuestion: {question}\nData:\n{summary}\nAnswer STRICTLY in {lang_full.get(lang, 'O`zbek')} language only. Show exact numbers and brief recommendations."
 
         chat = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
