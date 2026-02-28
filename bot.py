@@ -1,260 +1,157 @@
 import os
 import logging
 import sqlite3
-from datetime import datetime
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Application, CommandHandler, CallbackQueryHandler,
-    MessageHandler, filters, ContextTypes, ConversationHandler
-)
+from datetime import datetime, timedelta
 import google.generativeai as genai
 import pandas as pd
 import io
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application, CommandHandler, CallbackQueryHandler,
+    MessageHandler, filters, ContextTypes
+)
 
-# ─── CONFIGURATION ───────────────────────────────────────────────────────────
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 ADMIN_ID = int(os.environ["ADMIN_ID"])
 
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("gemini-2.0-flash")
+model = genai.GenerativeModel("gemini-1.5-pro")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+DB = "/data/clients.db"
 
-# ─── STATES ──────────────────────────────────────────────────────────────────
-LANGUAGE, WAITING_FILE = range(2)
-
-# ─── DATABASE ────────────────────────────────────────────────────────────────
 def init_db():
     os.makedirs("/data", exist_ok=True)
-    conn = sqlite3.connect("/data/clients.db")
-    c = conn.cursor()
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS clients (
+    with sqlite3.connect(DB) as conn:
+        conn.execute("""CREATE TABLE IF NOT EXISTS clients (
             telegram_id INTEGER PRIMARY KEY,
             unique_code TEXT UNIQUE,
             language TEXT DEFAULT 'uz',
             is_active INTEGER DEFAULT 0,
             subscription_end TEXT,
-            created_at TEXT
-        )
-    """)
-    conn.commit()
-    conn.close()
+            created_at TEXT)""")
+        conn.commit()
 
-def get_client(telegram_id):
-    conn = sqlite3.connect("/data/clients.db")
-    c = conn.cursor()
-    c.execute("SELECT * FROM clients WHERE telegram_id=?", (telegram_id,))
-    row = c.fetchone()
-    conn.close()
-    return row
+def get_client(tid):
+    with sqlite3.connect(DB) as conn:
+        return conn.execute("SELECT * FROM clients WHERE telegram_id=?", (tid,)).fetchone()
 
-def create_client(telegram_id, language):
-    conn = sqlite3.connect("/data/clients.db")
-    c = conn.cursor()
-    # Generate unique code ZH-705XXXXXXX
-    c.execute("SELECT COUNT(*) FROM clients")
-    count = c.fetchone()[0] + 1
-    unique_code = f"ZH-705{count:06d}"
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    c.execute("""
-        INSERT OR IGNORE INTO clients (telegram_id, unique_code, language, is_active, created_at)
-        VALUES (?, ?, ?, 0, ?)
-    """, (telegram_id, unique_code, language, now))
-    conn.commit()
-    conn.close()
-    return unique_code
+def get_client_by_code(code):
+    with sqlite3.connect(DB) as conn:
+        return conn.execute("SELECT * FROM clients WHERE unique_code=?", (code,)).fetchone()
 
-def update_language(telegram_id, lang):
-    conn = sqlite3.connect("/data/clients.db")
-    c = conn.cursor()
-    c.execute("UPDATE clients SET language=? WHERE telegram_id=?", (lang, telegram_id))
-    conn.commit()
-    conn.close()
+def create_client(tid, lang):
+    with sqlite3.connect(DB) as conn:
+        count = conn.execute("SELECT COUNT(*) FROM clients").fetchone()[0] + 1
+        code = f"ZH-705{count:06d}"
+        conn.execute("INSERT OR IGNORE INTO clients VALUES (?,?,?,0,?,?)",
+                     (tid, code, lang, None, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        conn.commit()
+    return code
 
-def set_active(unique_code, active: bool, months=1):
-    conn = sqlite3.connect("/data/clients.db")
-    c = conn.cursor()
-    from datetime import timedelta
-    end_date = (datetime.now() + timedelta(days=30 * months)).strftime("%Y-%m-%d")
-    c.execute("""
-        UPDATE clients SET is_active=?, subscription_end=? WHERE unique_code=?
-    """, (1 if active else 0, end_date if active else None, unique_code))
-    conn.commit()
-    conn.close()
+def set_language(tid, lang):
+    with sqlite3.connect(DB) as conn:
+        conn.execute("UPDATE clients SET language=? WHERE telegram_id=?", (lang, tid))
+        conn.commit()
 
-def is_active(telegram_id):
-    conn = sqlite3.connect("/data/clients.db")
-    c = conn.cursor()
-    c.execute("SELECT is_active, subscription_end FROM clients WHERE telegram_id=?", (telegram_id,))
-    row = c.fetchone()
-    conn.close()
-    if not row:
-        return False
-    if not row[0]:
-        return False
-    if row[1]:
-        end = datetime.strptime(row[1], "%Y-%m-%d")
-        if datetime.now() > end:
-            return False
+def activate(code, months=1):
+    end = (datetime.now() + timedelta(days=30*months)).strftime("%Y-%m-%d")
+    with sqlite3.connect(DB) as conn:
+        conn.execute("UPDATE clients SET is_active=1, subscription_end=? WHERE unique_code=?", (end, code))
+        conn.commit()
+
+def deactivate(code):
+    with sqlite3.connect(DB) as conn:
+        conn.execute("UPDATE clients SET is_active=0, subscription_end=NULL WHERE unique_code=?", (code,))
+        conn.commit()
+
+def check_active(tid):
+    c = get_client(tid)
+    if not c or not c[3]: return False
+    if c[4] and datetime.now() > datetime.strptime(c[4], "%Y-%m-%d"): return False
     return True
 
-def get_all_clients():
-    conn = sqlite3.connect("/data/clients.db")
-    c = conn.cursor()
-    c.execute("SELECT telegram_id, unique_code, language, is_active, subscription_end, created_at FROM clients")
-    rows = c.fetchall()
-    conn.close()
-    return rows
+def get_lang(tid):
+    c = get_client(tid)
+    return c[2] if c else "uz"
 
-# ─── TEXTS ───────────────────────────────────────────────────────────────────
-TEXTS = {
+def all_clients():
+    with sqlite3.connect(DB) as conn:
+        return conn.execute("SELECT * FROM clients").fetchall()
+
+TX = {
     "uz": {
-        "welcome": "Assalomu alaykum! 👋\nMen — Data Analiz Botiman.\n\nIltimos, tilni tanlang:",
-        "choose_lang": "Tilni tanlang / Выберите язык:",
-        "your_code": "✅ Ro'yxatdan o'tdingiz!\n\n🆔 Sizning unikal raqamingiz:\n<b>{code}</b>\n\nUshbu raqamni saqlab qo'ying — to'lovni shu raqam orqali tekshiramiz.",
-        "not_active": "❌ Sizning obunangiz faol emas.\n\n🆔 Sizning raqamingiz: <b>{code}</b>\n\nTo'lov qilish uchun adminga murojaat qiling.",
-        "choose_question": "📊 Qaysi tahlilni xohlaysiz?",
-        "send_file": "📁 Iltimos, Excel yoki CSV fayl yuboring.",
-        "analyzing": "⏳ Tahlil qilinmoqda, biroz kuting...",
-        "error_file": "❌ Faylni o'qishda xatolik. Iltimos, Excel (.xlsx) yoki CSV (.csv) fayl yuboring.",
-        "menu": "🏠 Bosh menyu",
+        "registered": "✅ Ro'yxatdan o'tdingiz!\n\n🆔 Raqamingiz: <b>{code}</b>\n\nBu raqamni saqlang — to'lovni shu raqam orqali tekshiramiz.",
+        "not_active": "❌ Obunangiz faol emas.\n\n🆔 Raqamingiz: <b>{code}</b>\n\nTo'lov qilish uchun adminga murojaat qiling.",
+        "choose": "📊 Qaysi bo'limni xohlaysiz?",
+        "send_file": "📁 Excel yoki CSV fayl yuboring.",
+        "analyzing": "⏳ Tahlil qilinmoqda...",
+        "file_error": "❌ Fayl o'qilmadi. Excel (.xlsx) yoki CSV (.csv) yuboring.",
         "back": "⬅️ Orqaga",
-        "sections": {
-            "sotuv": "📊 Сотув бўлими",
-            "moliya": "💰 Молия бўлими",
-            "mijozlar": "👥 Мижозлар бўлими",
-            "tahlil": "📈 Таҳлил бўлими",
-        },
+        "sections": {"sotuv":"📊 Сотув бўлими","moliya":"💰 Молия бўлими","mijozlar":"👥 Мижозлар бўлими","tahlil":"📈 Таҳлил бўлими"},
         "questions": {
-            "sotuv_1": "Энг кўп сотиладиган маҳсулот қайси?",
-            "sotuv_2": "Қайси ойда сотув юқори/паст бўлди?",
-            "sotuv_3": "Қайси мижоз энг кўп сотиб олди?",
-            "moliya_1": "Умумий фойда қанча?",
-            "moliya_2": "Харажат қаерда кўп кетади?",
-            "moliya_3": "Ўтган йил билан таққослаш",
-            "mijozlar_1": "Янги мижозлар сони?",
-            "mijozlar_2": "Кетиб қолган мижозлар?",
-            "mijozlar_3": "Содиқ мижозлар кимлар?",
-            "tahlil_1": "Кейинги ойдаги сотув таҳлили",
-            "tahlil_2": "Қайси маҳсулотга инвестиция киритиш керак?",
-            "tahlil_3": "Тренд қандай?",
-        }
+            "s1":"Энг кўп сотиладиган маҳсулот қайси?","s2":"Қайси ойда сотув юқори/паст бўлди?","s3":"Қайси мижоз энг кўп сотиб олди?",
+            "m1":"Умумий фойда қанча?","m2":"Харажат қаерда кўп кетади?","m3":"Ўтган йил билан таққослаш",
+            "j1":"Янги мижозлар сони?","j2":"Кетиб қолган мижозлар?","j3":"Содиқ мижозлар кимлар?",
+            "t1":"Кейинги ойдаги сотув таҳлили","t2":"Қайси маҳсулотга инвестиция киритиш керак?","t3":"Тренд қандай?"}
     },
     "kz": {
-        "welcome": "Сәлеметсіз бе! 👋\nМен — Дата Аналитика Ботымын.\n\nТілді таңдаңыз:",
-        "choose_lang": "Тілді таңдаңыз:",
-        "your_code": "✅ Тіркелдіңіз!\n\n🆔 Сіздің уникал нөміріңіз:\n<b>{code}</b>\n\nБұл нөмірді сақтаңыз — төлемді осы нөмір арқылы тексереміз.",
-        "not_active": "❌ Сіздің жазылымыңыз белсенді емес.\n\n🆔 Сіздің нөміріңіз: <b>{code}</b>\n\nТөлем жасау үшін әкімшіге хабарласыңыз.",
-        "choose_question": "📊 Қандай талдау керек?",
+        "registered": "✅ Тіркелдіңіз!\n\n🆔 Нөміріңіз: <b>{code}</b>\n\nБұл нөмірді сақтаңыз — төлемді осы нөмір арқылы тексереміз.",
+        "not_active": "❌ Жазылымыңыз белсенді емес.\n\n🆔 Нөміріңіз: <b>{code}</b>\n\nТөлем жасау үшін әкімшіге хабарласыңыз.",
+        "choose": "📊 Қандай бөлім керек?",
         "send_file": "📁 Excel немесе CSV файл жіберіңіз.",
-        "analyzing": "⏳ Талдау жасалуда, күте тұрыңыз...",
-        "error_file": "❌ Файлды оқуда қате. Excel (.xlsx) немесе CSV (.csv) файл жіберіңіз.",
-        "menu": "🏠 Басты мәзір",
+        "analyzing": "⏳ Талдау жасалуда...",
+        "file_error": "❌ Файл оқылмады. Excel (.xlsx) немесе CSV (.csv) жіберіңіз.",
         "back": "⬅️ Артқа",
-        "sections": {
-            "sotuv": "📊 Сатылым бөлімі",
-            "moliya": "💰 Қаржы бөлімі",
-            "mijozlar": "👥 Тұтынушылар бөлімі",
-            "tahlil": "📈 Талдау бөлімі",
-        },
+        "sections": {"sotuv":"📊 Сатылым бөлімі","moliya":"💰 Қаржы бөлімі","mijozlar":"👥 Тұтынушылар бөлімі","tahlil":"📈 Талдау бөлімі"},
         "questions": {
-            "sotuv_1": "Ең көп сатылатын тауар қайсы?",
-            "sotuv_2": "Қай айда сатылым жоғары/төмен болды?",
-            "sotuv_3": "Қай тұтынушы ең көп сатып алды?",
-            "moliya_1": "Жалпы пайда қанша?",
-            "moliya_2": "Шығын қай жерде көп кетеді?",
-            "moliya_3": "Өткен жылмен салыстыру",
-            "mijozlar_1": "Жаңа тұтынушылар саны?",
-            "mijozlar_2": "Кетіп қалған тұтынушылар?",
-            "mijozlar_3": "Ең адал тұтынушылар кімдер?",
-            "tahlil_1": "Келесі айдағы сатылым талдауы",
-            "tahlil_2": "Қай өнімге инвестиция салу керек?",
-            "tahlil_3": "Тренд қандай?",
-        }
+            "s1":"Ең көп сатылатын тауар қайсы?","s2":"Қай айда сатылым жоғары/төмен болды?","s3":"Қай тұтынушы ең көп сатып алды?",
+            "m1":"Жалпы пайда қанша?","m2":"Шығын қай жерде көп кетеді?","m3":"Өткен жылмен салыстыру",
+            "j1":"Жаңа тұтынушылар саны?","j2":"Кетіп қалған тұтынушылар?","j3":"Ең адал тұтынушылар кімдер?",
+            "t1":"Келесі айдағы сатылым талдауы","t2":"Қай өнімге инвестиция салу керек?","t3":"Тренд қандай?"}
     },
     "ru": {
-        "welcome": "Здравствуйте! 👋\nЯ — Бот Аналитики Данных.\n\nПожалуйста, выберите язык:",
-        "choose_lang": "Выберите язык:",
-        "your_code": "✅ Вы зарегистрированы!\n\n🆔 Ваш уникальный номер:\n<b>{code}</b>\n\nСохраните этот номер — оплата проверяется по нему.",
-        "not_active": "❌ Ваша подписка неактивна.\n\n🆔 Ваш номер: <b>{code}</b>\n\nДля оплаты обратитесь к администратору.",
-        "choose_question": "📊 Какой анализ вы хотите?",
-        "send_file": "📁 Пожалуйста, отправьте файл Excel или CSV.",
-        "analyzing": "⏳ Анализируем, подождите...",
-        "error_file": "❌ Ошибка при чтении файла. Отправьте Excel (.xlsx) или CSV (.csv).",
-        "menu": "🏠 Главное меню",
+        "registered": "✅ Вы зарегистрированы!\n\n🆔 Ваш номер: <b>{code}</b>\n\nСохраните этот номер — оплата проверяется по нему.",
+        "not_active": "❌ Подписка неактивна.\n\n🆔 Ваш номер: <b>{code}</b>\n\nОбратитесь к администратору для оплаты.",
+        "choose": "📊 Какой раздел вас интересует?",
+        "send_file": "📁 Отправьте файл Excel или CSV.",
+        "analyzing": "⏳ Анализируем...",
+        "file_error": "❌ Файл не прочитан. Отправьте Excel (.xlsx) или CSV (.csv).",
         "back": "⬅️ Назад",
-        "sections": {
-            "sotuv": "📊 Отдел продаж",
-            "moliya": "💰 Финансовый отдел",
-            "mijozlar": "👥 Отдел клиентов",
-            "tahlil": "📈 Отдел аналитики",
-        },
+        "sections": {"sotuv":"📊 Продажи","moliya":"💰 Финансы","mijozlar":"👥 Клиенты","tahlil":"📈 Аналитика"},
         "questions": {
-            "sotuv_1": "Какой товар продаётся больше всего?",
-            "sotuv_2": "В каком месяце продажи были высокими/низкими?",
-            "sotuv_3": "Какой клиент купил больше всего?",
-            "moliya_1": "Какова общая прибыль?",
-            "moliya_2": "Где больше всего расходов?",
-            "moliya_3": "Сравнение с прошлым годом",
-            "mijozlar_1": "Количество новых клиентов?",
-            "mijozlar_2": "Ушедшие клиенты?",
-            "mijozlar_3": "Кто самые лояльные клиенты?",
-            "tahlil_1": "Прогноз продаж на следующий месяц",
-            "tahlil_2": "В какой продукт стоит инвестировать?",
-            "tahlil_3": "Какой тренд?",
-        }
+            "s1":"Какой товар продаётся больше всего?","s2":"В каком месяце продажи были выше/ниже?","s3":"Какой клиент купил больше всего?",
+            "m1":"Какова общая прибыль?","m2":"Где больше всего расходов?","m3":"Сравнение с прошлым годом",
+            "j1":"Количество новых клиентов?","j2":"Ушедшие клиенты?","j3":"Кто самые лояльные клиенты?",
+            "t1":"Прогноз продаж на следующий месяц","t2":"В какой продукт стоит инвестировать?","t3":"Какой тренд?"}
     },
     "en": {
-        "welcome": "Hello! 👋\nI am a Data Analytics Bot.\n\nPlease choose your language:",
-        "choose_lang": "Choose language:",
-        "your_code": "✅ You are registered!\n\n🆔 Your unique code:\n<b>{code}</b>\n\nSave this code — payments are verified by it.",
-        "not_active": "❌ Your subscription is not active.\n\n🆔 Your code: <b>{code}</b>\n\nContact admin to make payment.",
-        "choose_question": "📊 What analysis do you need?",
+        "registered": "✅ You are registered!\n\n🆔 Your code: <b>{code}</b>\n\nSave this code — payments are verified by it.",
+        "not_active": "❌ Subscription not active.\n\n🆔 Your code: <b>{code}</b>\n\nContact admin to make payment.",
+        "choose": "📊 Which section do you need?",
         "send_file": "📁 Please send an Excel or CSV file.",
-        "analyzing": "⏳ Analyzing, please wait...",
-        "error_file": "❌ Error reading file. Please send Excel (.xlsx) or CSV (.csv).",
-        "menu": "🏠 Main menu",
+        "analyzing": "⏳ Analyzing...",
+        "file_error": "❌ Could not read file. Send Excel (.xlsx) or CSV (.csv).",
         "back": "⬅️ Back",
-        "sections": {
-            "sotuv": "📊 Sales Department",
-            "moliya": "💰 Finance Department",
-            "mijozlar": "👥 Customers Department",
-            "tahlil": "📈 Analytics Department",
-        },
+        "sections": {"sotuv":"📊 Sales","moliya":"💰 Finance","mijozlar":"👥 Customers","tahlil":"📈 Analytics"},
         "questions": {
-            "sotuv_1": "Which product sells the most?",
-            "sotuv_2": "Which month had highest/lowest sales?",
-            "sotuv_3": "Which customer bought the most?",
-            "moliya_1": "What is the total profit?",
-            "moliya_2": "Where are the most expenses?",
-            "moliya_3": "Comparison with last year",
-            "mijozlar_1": "Number of new customers?",
-            "mijozlar_2": "Lost customers?",
-            "mijozlar_3": "Who are the most loyal customers?",
-            "tahlil_1": "Next month sales forecast",
-            "tahlil_2": "Which product to invest in?",
-            "tahlil_3": "What is the trend?",
-        }
+            "s1":"Which product sells the most?","s2":"Which month had highest/lowest sales?","s3":"Which customer bought the most?",
+            "m1":"What is the total profit?","m2":"Where are the most expenses?","m3":"Comparison with last year",
+            "j1":"Number of new customers?","j2":"Lost customers?","j3":"Who are the most loyal customers?",
+            "t1":"Next month sales forecast","t2":"Which product to invest in?","t3":"What is the trend?"}
     }
 }
 
-def t(lang, key, **kwargs):
-    text = TEXTS.get(lang, TEXTS["uz"]).get(key, key)
-    if kwargs:
-        text = text.format(**kwargs)
-    return text
+SECTION_KEYS = {"sotuv":["s1","s2","s3"],"moliya":["m1","m2","m3"],"mijozlar":["j1","j2","j3"],"tahlil":["t1","t2","t3"]}
+LANG_NAMES = {"uz":"o'zbek","kz":"qozoq","ru":"rus","en":"english"}
 
-def get_lang(telegram_id):
-    client = get_client(telegram_id)
-    if client:
-        return client[2] or "uz"
-    return "uz"
+def t(lang, key, **kw):
+    val = TX.get(lang, TX["uz"]).get(key, key)
+    return val.format(**kw) if kw else val
 
-# ─── KEYBOARDS ───────────────────────────────────────────────────────────────
-def lang_keyboard():
+def lang_kb():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🇺🇿 Ўзбекча", callback_data="lang_uz"),
          InlineKeyboardButton("🇰🇿 Қазақша", callback_data="lang_kz")],
@@ -262,293 +159,196 @@ def lang_keyboard():
          InlineKeyboardButton("🇬🇧 English", callback_data="lang_en")],
     ])
 
-def main_menu_keyboard(lang):
-    tx = TEXTS.get(lang, TEXTS["uz"])
-    sections = tx["sections"]
+def main_kb(lang):
+    s = TX[lang]["sections"]
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(sections["sotuv"], callback_data="section_sotuv")],
-        [InlineKeyboardButton(sections["moliya"], callback_data="section_moliya")],
-        [InlineKeyboardButton(sections["mijozlar"], callback_data="section_mijozlar")],
-        [InlineKeyboardButton(sections["tahlil"], callback_data="section_tahlil")],
+        [InlineKeyboardButton(s["sotuv"], callback_data="sec_sotuv")],
+        [InlineKeyboardButton(s["moliya"], callback_data="sec_moliya")],
+        [InlineKeyboardButton(s["mijozlar"], callback_data="sec_mijozlar")],
+        [InlineKeyboardButton(s["tahlil"], callback_data="sec_tahlil")],
     ])
 
-def questions_keyboard(lang, section):
-    tx = TEXTS.get(lang, TEXTS["uz"])
-    qs = tx["questions"]
-    keys = [k for k in qs if k.startswith(section)]
-    buttons = [[InlineKeyboardButton(qs[k], callback_data=f"q_{k}")] for k in keys]
-    buttons.append([InlineKeyboardButton(t(lang, "back"), callback_data="back_menu")])
-    return InlineKeyboardMarkup(buttons)
+def questions_kb(lang, section):
+    qs = TX[lang]["questions"]
+    keys = SECTION_KEYS[section]
+    btns = [[InlineKeyboardButton(qs[k], callback_data=f"q_{k}")] for k in keys]
+    btns.append([InlineKeyboardButton(t(lang, "back"), callback_data="back")])
+    return InlineKeyboardMarkup(btns)
 
-# ─── HANDLERS ────────────────────────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    client = get_client(user_id)
+    tid = update.effective_user.id
+    client = get_client(tid)
     if not client:
         await update.message.reply_text(
-            "Assalomu alaykum! / Сәлеметсіз бе! / Здравствуйте! / Hello! 👋\n\nIltimos, tilni tanlang / Тілді таңдаңыз / Выберите язык / Choose language:",
-            reply_markup=lang_keyboard()
+            "Assalomu alaykum / Сәлеметсіз бе / Здравствуйте / Hello! 👋\n\nTilni tanlang / Тілді таңдаңыз / Выберите язык / Choose language:",
+            reply_markup=lang_kb()
         )
+        return
+    lang = client[2]
+    if check_active(tid):
+        await update.message.reply_text(t(lang, "choose"), reply_markup=main_kb(lang))
     else:
-        lang = client[2]
-        if is_active(user_id):
-            await update.message.reply_text(
-                t(lang, "choose_question"),
-                reply_markup=main_menu_keyboard(lang)
-            )
-        else:
-            await update.message.reply_text(
-                t(lang, "not_active", code=client[1]),
-                parse_mode="HTML"
-            )
+        await update.message.reply_text(t(lang, "not_active", code=client[1]), parse_mode="HTML")
 
-async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    data = query.data
+async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    tid = q.from_user.id
+    data = q.data
 
-    # Language selection
     if data.startswith("lang_"):
-        lang = data.split("_")[1]
-        client = get_client(user_id)
+        lang = data[5:]
+        client = get_client(tid)
         if not client:
-            code = create_client(user_id, lang)
-            await query.edit_message_text(
-                t(lang, "your_code", code=code),
-                parse_mode="HTML"
-            )
-            await query.message.reply_text(
-                t(lang, "not_active", code=code),
-                parse_mode="HTML"
-            )
+            code = create_client(tid, lang)
+            await q.edit_message_text(t(lang, "registered", code=code), parse_mode="HTML")
+            await q.message.reply_text(t(lang, "not_active", code=code), parse_mode="HTML")
         else:
-            update_language(user_id, lang)
-            client = get_client(user_id)
-            if is_active(user_id):
-                await query.edit_message_text(
-                    t(lang, "choose_question"),
-                    reply_markup=main_menu_keyboard(lang)
-                )
+            set_language(tid, lang)
+            if check_active(tid):
+                await q.edit_message_text(t(lang, "choose"), reply_markup=main_kb(lang))
             else:
-                await query.edit_message_text(
-                    t(lang, "not_active", code=client[1]),
-                    parse_mode="HTML"
-                )
+                await q.edit_message_text(t(lang, "not_active", code=client[1]), parse_mode="HTML")
         return
 
-    lang = get_lang(user_id)
+    lang = get_lang(tid)
 
-    # Check subscription
-    if not is_active(user_id):
-        client = get_client(user_id)
-        code = client[1] if client else "—"
-        await query.edit_message_text(
-            t(lang, "not_active", code=code),
-            parse_mode="HTML"
-        )
+    if data == "back":
+        await q.edit_message_text(t(lang, "choose"), reply_markup=main_kb(lang))
         return
 
-    # Back to menu
-    if data == "back_menu":
-        await query.edit_message_text(
-            t(lang, "choose_question"),
-            reply_markup=main_menu_keyboard(lang)
-        )
+    if data.startswith("sec_"):
+        section = data[4:]
+        await q.edit_message_text(t(lang, "choose"), reply_markup=questions_kb(lang, section))
         return
 
-    # Section selected
-    if data.startswith("section_"):
-        section = data.split("_")[1]
-        await query.edit_message_text(
-            t(lang, "choose_question"),
-            reply_markup=questions_keyboard(lang, section)
-        )
-        return
-
-    # Question selected
     if data.startswith("q_"):
-        question_key = data[2:]
-        tx = TEXTS.get(lang, TEXTS["uz"])
-        question_text = tx["questions"].get(question_key, question_key)
-        context.user_data["pending_question"] = question_text
-        context.user_data["pending_lang"] = lang
-        await query.edit_message_text(
-            f"❓ <b>{question_text}</b>\n\n{t(lang, 'send_file')}",
-            parse_mode="HTML"
-        )
+        if not check_active(tid):
+            client = get_client(tid)
+            code = client[1] if client else "—"
+            await q.edit_message_text(t(lang, "not_active", code=code), parse_mode="HTML")
+            return
+        qkey = data[2:]
+        qtext = TX[lang]["questions"].get(qkey, qkey)
+        context.user_data["question"] = qtext
+        await q.edit_message_text(f"❓ <b>{qtext}</b>\n\n{t(lang, 'send_file')}", parse_mode="HTML")
         return
 
-async def file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    lang = get_lang(user_id)
+async def on_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    tid = update.effective_user.id
+    lang = get_lang(tid)
 
-    if not is_active(user_id):
-        client = get_client(user_id)
+    if not check_active(tid):
+        client = get_client(tid)
         code = client[1] if client else "—"
-        await update.message.reply_text(
-            t(lang, "not_active", code=code),
-            parse_mode="HTML"
-        )
+        await update.message.reply_text(t(lang, "not_active", code=code), parse_mode="HTML")
         return
 
-    question = context.user_data.get("pending_question")
+    question = context.user_data.get("question")
     if not question:
-        await update.message.reply_text(t(lang, "choose_question"), reply_markup=main_menu_keyboard(lang))
+        await update.message.reply_text(t(lang, "choose"), reply_markup=main_kb(lang))
         return
 
     doc = update.message.document
     if not doc:
-        await update.message.reply_text(t(lang, "error_file"))
+        await update.message.reply_text(t(lang, "file_error"))
         return
 
-    file_name = doc.file_name or ""
-    if not (file_name.endswith(".xlsx") or file_name.endswith(".xls") or file_name.endswith(".csv")):
-        await update.message.reply_text(t(lang, "error_file"))
+    fname = doc.file_name or ""
+    if not (fname.endswith(".xlsx") or fname.endswith(".xls") or fname.endswith(".csv")):
+        await update.message.reply_text(t(lang, "file_error"))
         return
 
-    wait_msg = await update.message.reply_text(t(lang, "analyzing"))
+    wait = await update.message.reply_text(t(lang, "analyzing"))
 
     try:
         file = await doc.get_file()
-        file_bytes = await file.download_as_bytearray()
-        file_io = io.BytesIO(bytes(file_bytes))
+        raw = await file.download_as_bytearray()
+        fio = io.BytesIO(bytes(raw))
+        df = pd.read_csv(fio) if fname.endswith(".csv") else pd.read_excel(fio)
 
-        if file_name.endswith(".csv"):
-            df = pd.read_csv(file_io)
-        else:
-            df = pd.read_excel(file_io)
-
-        # Prepare data summary for Gemini
-        data_summary = f"""
-Fayl: {file_name}
-Ustunlar: {list(df.columns)}
-Qatorlar soni: {len(df)}
-Birinchi 20 qator:
-{df.head(20).to_string()}
-
-Statistika:
-{df.describe().to_string()}
-"""
-
-        prompt = f"""
-Sen professional data analitiksan. Quyidagi ma'lumotlarga asoslanib savolga javob ber.
-
-Savol: {question}
-
-Ma'lumotlar:
-{data_summary}
-
-Iltimos:
-1. Aniq va tushunarli javob ber
-2. Muhim raqamlarni ko'rsat
-3. Qisqa tavsiyalar ber
-4. Javobni {lang} tilida yoz (uz=o'zbek, kz=qozoq, ru=rus, en=ingliz)
-"""
+        summary = f"Ustunlar: {list(df.columns)}\nQatorlar: {len(df)}\n{df.head(20).to_string()}\n{df.describe().to_string()}"
+        prompt = f"Sen professional data analitiksan.\nSavol: {question}\nMa'lumotlar:\n{summary}\nJavobni {LANG_NAMES.get(lang,'o`zbek')} tilida yoz. Aniq raqamlar va qisqa tavsiyalar ber."
 
         response = model.generate_content(prompt)
-        result_text = response.text
+        result = response.text
 
-        await wait_msg.delete()
-        await update.message.reply_text(
-            f"📊 <b>{question}</b>\n\n{result_text}",
-            parse_mode="HTML"
-        )
-        await update.message.reply_text(
-            t(lang, "choose_question"),
-            reply_markup=main_menu_keyboard(lang)
-        )
-        context.user_data.pop("pending_question", None)
+        await wait.delete()
+        await update.message.reply_text(f"📊 <b>{question}</b>\n\n{result}", parse_mode="HTML")
+        await update.message.reply_text(t(lang, "choose"), reply_markup=main_kb(lang))
+        context.user_data.pop("question", None)
 
     except Exception as e:
-        logger.error(f"Error: {e}")
-        await wait_msg.delete()
-        await update.message.reply_text(t(lang, "error_file"))
+        logger.error(f"File error: {e}")
+        await wait.delete()
+        await update.message.reply_text(t(lang, "file_error"))
 
-# ─── ADMIN COMMANDS ───────────────────────────────────────────────────────────
-async def admin_activate(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
+async def cmd_activate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID: return
     args = context.args
-    if len(args) < 1:
-        await update.message.reply_text("Ishlatish: /activate ZH-705000001")
+    if not args:
+        await update.message.reply_text("Ishlatish: /activate ZH-705000001 yoki /activate ZH-705000001 3")
         return
     code = args[0]
     months = int(args[1]) if len(args) > 1 else 1
-    set_active(code, True, months)
-    await update.message.reply_text(f"✅ {code} — {months} oyga faollashtirildi!")
-    # Клиентке оның тілінде хабарлама жібер
-    conn = sqlite3.connect("/data/clients.db")
-    c = conn.cursor()
-    c.execute("SELECT telegram_id, language FROM clients WHERE unique_code=?", (code,))
-    row = c.fetchone()
-    conn.close()
-    if row:
-        client_id, lang = row
-        notify_texts = {
-            "uz": f"✅ Tabriklaymiz! Obunangiz faollashtirildi!\n\n🆔 Kod: <b>{code}</b>\n\nBoshlash uchun /start yozing.",
-            "kz": f"✅ Құттықтаймыз! Жазылымыңыз белсендірілді!\n\n🆔 Код: <b>{code}</b>\n\nБастау үшін /start жазыңыз.",
-            "ru": f"✅ Поздравляем! Подписка активирована!\n\n🆔 Код: <b>{code}</b>\n\nНапишите /start для начала.",
-            "en": f"✅ Congratulations! Subscription activated!\n\n🆔 Code: <b>{code}</b>\n\nWrite /start to begin.",
-        }
-        text = notify_texts.get(lang, notify_texts["uz"])
-        try:
-            await context.bot.send_message(chat_id=client_id, text=text, parse_mode="HTML")
-        except Exception:
-            pass
-
-async def admin_deactivate(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
+    client = get_client_by_code(code)
+    if not client:
+        await update.message.reply_text(f"❌ {code} topilmadi!")
         return
+    activate(code, months)
+    await update.message.reply_text(f"✅ {code} — {months} oyga faollashtirildi!")
+    lang = client[2]
+    notify = {
+        "uz": f"✅ Obunangiz faollashtirildi ({months} oy)!\n\nDavom etish uchun /start yozing.",
+        "kz": f"✅ Жазылымыңыз белсендірілді ({months} ай)!\n\n/start жазыңыз.",
+        "ru": f"✅ Подписка активирована ({months} мес.)!\n\nНапишите /start.",
+        "en": f"✅ Subscription activated ({months} month(s))!\n\nWrite /start.",
+    }
+    try:
+        await context.bot.send_message(chat_id=client[0], text=notify.get(lang, notify["uz"]))
+    except Exception: pass
+
+async def cmd_deactivate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID: return
     args = context.args
-    if len(args) < 1:
+    if not args:
         await update.message.reply_text("Ishlatish: /deactivate ZH-705000001")
         return
-    code = args[0]
-    set_active(code, False)
-    await update.message.reply_text(f"❌ {code} — o'chirildi!")
+    deactivate(args[0])
+    await update.message.reply_text(f"❌ {args[0]} — o'chirildi!")
 
-async def admin_clients(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-    clients = get_all_clients()
+async def cmd_clients(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID: return
+    clients = all_clients()
     if not clients:
-        await update.message.reply_text("Hech qanday mijoz yo'q.")
+        await update.message.reply_text("Mijozlar yo'q.")
         return
     text = "👥 <b>Barcha mijozlar:</b>\n\n"
     for c in clients:
-        status = "✅ Faol" if c[3] else "❌ Faol emas"
-        end = c[4] or "—"
-        text += f"🆔 <b>{c[1]}</b> | {status} | {end}\n"
+        status = "✅" if c[3] else "❌"
+        text += f"{status} <b>{c[1]}</b> | {c[2].upper()} | {c[4] or '—'}\n"
     await update.message.reply_text(text, parse_mode="HTML")
 
-async def admin_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-    text = """
-👨‍💼 <b>Admin buyruqlari:</b>
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID: return
+    await update.message.reply_text("""👨‍💼 <b>Admin buyruqlari:</b>
 
-/activate ZH-705000001 — Faollashtirish (1 oy)
+/activate ZH-705000001 — 1 oyga faollashtirish
 /activate ZH-705000001 3 — 3 oyga faollashtirish
 /deactivate ZH-705000001 — O'chirish
-/clients — Barcha mijozlar ro'yxati
-/adminhelp — Yordam
-"""
-    await update.message.reply_text(text, parse_mode="HTML")
+/clients — Barcha mijozlar
+/adminhelp — Yordam""", parse_mode="HTML")
 
-# ─── MAIN ─────────────────────────────────────────────────────────────────────
 def main():
     init_db()
     app = Application.builder().token(BOT_TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("activate", admin_activate))
-    app.add_handler(CommandHandler("deactivate", admin_deactivate))
-    app.add_handler(CommandHandler("clients", admin_clients))
-    app.add_handler(CommandHandler("adminhelp", admin_help))
-    app.add_handler(CallbackQueryHandler(callback_handler))
-    app.add_handler(MessageHandler(filters.Document.ALL, file_handler))
-
+    app.add_handler(CommandHandler("activate", cmd_activate))
+    app.add_handler(CommandHandler("deactivate", cmd_deactivate))
+    app.add_handler(CommandHandler("clients", cmd_clients))
+    app.add_handler(CommandHandler("adminhelp", cmd_help))
+    app.add_handler(CallbackQueryHandler(on_callback))
+    app.add_handler(MessageHandler(filters.Document.ALL, on_file))
     logger.info("Bot started!")
     app.run_polling()
 
