@@ -476,6 +476,25 @@ async def admin_activate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     months = int(args[1]) if len(args) > 1 else 1
     set_active(code, True, months)
     await update.message.reply_text(f"✅ {code} — {months} oyga faollashtirildi!")
+    # Клиентке оның тілінде хабарлама жібер
+    conn = sqlite3.connect("clients.db")
+    c = conn.cursor()
+    c.execute("SELECT telegram_id, language FROM clients WHERE unique_code=?", (code,))
+    row = c.fetchone()
+    conn.close()
+    if row:
+        client_id, lang = row
+        notify_texts = {
+            "uz": f"✅ Tabriklaymiz! Obunangiz faollashtirildi!\n\n🆔 Kod: <b>{code}</b>\n\nBoshlash uchun /start yozing.",
+            "kz": f"✅ Құттықтаймыз! Жазылымыңыз белсендірілді!\n\n🆔 Код: <b>{code}</b>\n\nБастау үшін /start жазыңыз.",
+            "ru": f"✅ Поздравляем! Подписка активирована!\n\n🆔 Код: <b>{code}</b>\n\nНапишите /start для начала.",
+            "en": f"✅ Congratulations! Subscription activated!\n\n🆔 Code: <b>{code}</b>\n\nWrite /start to begin.",
+        }
+        text = notify_texts.get(lang, notify_texts["uz"])
+        try:
+            await context.bot.send_message(chat_id=client_id, text=text, parse_mode="HTML")
+        except Exception:
+            pass
 
 async def admin_deactivate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
