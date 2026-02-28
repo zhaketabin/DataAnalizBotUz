@@ -12,7 +12,7 @@ from telegram.ext import (
 )
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
-GROQ_API_KEY = os.environ["GROQ_API_KEY"]
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "осында_кілтіңді_жаз")
 ADMIN_ID = int(os.environ["ADMIN_ID"])
 
 groq_client = Groq(api_key=GROQ_API_KEY)
