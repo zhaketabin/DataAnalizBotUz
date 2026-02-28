@@ -12,9 +12,9 @@ import pandas as pd
 import io
 
 # ─── CONFIGURATION ───────────────────────────────────────────────────────────
-BOT_TOKEN = os.environ["BOT_TOKEN"]
-GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
-ADMIN_ID = int(os.environ["ADMIN_ID"])
+BOT_TOKEN = os.environ.get("BOT_TOKEN") or "ТОКЕНДІ_ОСЫ_ЖЕРГЕ_ЖАЗ"
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") or "GEMINI_КІЛТІН_ОСЫ_ЖЕРГЕ_ЖАЗ"
+ADMIN_ID = int(os.environ.get("ADMIN_ID") or "ADMIN_ID_ОСЫ_ЖЕРГЕ_ЖАЗ")
 
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel("gemini-1.5-flash")
@@ -285,7 +285,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     client = get_client(user_id)
     if not client:
         await update.message.reply_text(
-            TEXTS["uz"]["welcome"],
+            "Assalomu alaykum! / Сәлеметсіз бе! / Здравствуйте! / Hello! 👋\n\nIltimos, tilni tanlang / Тілді таңдаңыз / Выберите язык / Choose language:",
             reply_markup=lang_keyboard()
         )
     else:
@@ -317,13 +317,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 t(lang, "your_code", code=code),
                 parse_mode="HTML"
             )
-            # Show not active message after registration
             await query.message.reply_text(
                 t(lang, "not_active", code=code),
                 parse_mode="HTML"
             )
         else:
             update_language(user_id, lang)
+            client = get_client(user_id)
             if is_active(user_id):
                 await query.edit_message_text(
                     t(lang, "choose_question"),
@@ -331,7 +331,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             else:
                 await query.edit_message_text(
-                    t(lang, "not_active", code=get_client(user_id)[1]),
+                    t(lang, "not_active", code=client[1]),
                     parse_mode="HTML"
                 )
         return
